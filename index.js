@@ -5,6 +5,29 @@ require("dotenv").config();
 const { Client, LocalAuth, List, Buttons } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const axios  = require("axios");
+const express = require('express');   // <-- Added for Render health check
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Health check HTTP server for Render (does not interfere with WhatsApp bot)
+// ─────────────────────────────────────────────────────────────────────────────
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.status(200).send('OK');
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Health check server listening on port ${PORT}`);
+});
+
+server.on('error', (err) => {
+  console.error('HTTP server error:', err.message);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
