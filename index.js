@@ -183,7 +183,7 @@ const httpServer = http.createServer(async (req, res) => {
   `);
 });
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`\n🌐 QR Server running on port ${PORT}`);
   console.log(`   Local:  http://localhost:${PORT}`);
   console.log(`   Render: https://your-bot-service.onrender.com\n`);
