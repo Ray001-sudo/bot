@@ -3,8 +3,10 @@
 require("dotenv").config();
 
 const { Client, LocalAuth, List, Buttons } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
-const axios  = require("axios");
+const qrcode         = require("qrcode-terminal");
+const QRCode         = require("qrcode");
+const axios          = require("axios");
+const http           = require("http");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -12,25 +14,185 @@ const axios  = require("axios");
 
 const API_BASE      = (process.env.API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "+254700000000";
+const PORT          = process.env.PORT || 3001;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QR HTTP Server
+// When the bot needs a QR scan, visit:
+//   http://localhost:3001         (local)
+//   https://your-bot.onrender.com (Render)
+// The page auto-refreshes every 10s so you always see the latest QR code.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let currentQR        = null;   // raw QR string from whatsapp-web.js
+let qrImageDataUrl   = null;   // base64 PNG of the QR code
+let botStatus        = "starting"; // "starting" | "qr_ready" | "authenticated" | "ready"
+
+async function updateQRImage(qrString) {
+  try {
+    qrImageDataUrl = await QRCode.toDataURL(qrString, {
+      width: 400,
+      margin: 2,
+      color: { dark: "#000000", light: "#ffffff" },
+    });
+  } catch (err) {
+    console.error("[QR] Failed to generate QR image:", err.message);
+  }
+}
+
+const httpServer = http.createServer(async (req, res) => {
+  // Health check endpoint — Render uses this to confirm the service is up
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: botStatus, timestamp: new Date().toISOString() }));
+    return;
+  }
+
+  // Main QR page
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+
+  if (botStatus === "ready" || botStatus === "authenticated") {
+    res.end(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>DataMart Bot</title>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { font-family: sans-serif; display: flex; flex-direction: column;
+                   align-items: center; justify-content: center; min-height: 100vh;
+                   margin: 0; background: #f0fdf4; }
+            .card { background: white; border-radius: 16px; padding: 40px;
+                    box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; max-width: 400px; }
+            .icon { font-size: 64px; margin-bottom: 16px; }
+            h1 { color: #16a34a; margin: 0 0 8px; }
+            p { color: #6b7280; margin: 0; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="icon">✅</div>
+            <h1>Bot is Live!</h1>
+            <p>DataMart WhatsApp Bot is connected and running.<br>No QR scan needed.</p>
+          </div>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  if (!qrImageDataUrl) {
+    res.end(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>DataMart Bot — Starting</title>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta http-equiv="refresh" content="5">
+          <style>
+            body { font-family: sans-serif; display: flex; flex-direction: column;
+                   align-items: center; justify-content: center; min-height: 100vh;
+                   margin: 0; background: #f9fafb; }
+            .card { background: white; border-radius: 16px; padding: 40px;
+                    box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; max-width: 400px; }
+            .spinner { width: 48px; height: 48px; border: 4px solid #e5e7eb;
+                       border-top-color: #16a34a; border-radius: 50%;
+                       animation: spin 1s linear infinite; margin: 0 auto 16px; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+            h1 { color: #111827; margin: 0 0 8px; font-size: 20px; }
+            p { color: #6b7280; margin: 0; font-size: 14px; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="spinner"></div>
+            <h1>Starting WhatsApp Bot…</h1>
+            <p>QR code is being generated.<br>This page refreshes automatically.</p>
+          </div>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  // QR code ready — show it
+  res.end(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>DataMart Bot — Scan QR</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="refresh" content="30">
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                 display: flex; flex-direction: column; align-items: center;
+                 justify-content: center; min-height: 100vh;
+                 background: #f0fdf4; padding: 24px; }
+          .card { background: white; border-radius: 20px; padding: 40px 32px;
+                  box-shadow: 0 8px 32px rgba(0,0,0,0.10); text-align: center;
+                  max-width: 480px; width: 100%; }
+          .logo { font-size: 40px; margin-bottom: 8px; }
+          h1 { color: #111827; font-size: 22px; margin-bottom: 6px; }
+          .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 28px; line-height: 1.5; }
+          .qr-wrapper { background: #f9fafb; border: 2px solid #e5e7eb;
+                        border-radius: 16px; padding: 20px; display: inline-block;
+                        margin-bottom: 24px; }
+          .qr-wrapper img { display: block; width: 280px; height: 280px; }
+          .steps { text-align: left; background: #f0fdf4; border-radius: 12px;
+                   padding: 16px 20px; margin-bottom: 20px; }
+          .steps p { font-size: 13px; color: #374151; margin-bottom: 6px; line-height: 1.5; }
+          .steps p:last-child { margin-bottom: 0; }
+          .steps strong { color: #16a34a; }
+          .refresh-note { color: #9ca3af; font-size: 12px; }
+          .pulse { display: inline-block; width: 8px; height: 8px; background: #16a34a;
+                   border-radius: 50%; margin-right: 6px;
+                   animation: pulse 2s ease-in-out infinite; }
+          @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.3); }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="logo">📱</div>
+          <h1>Scan to Connect WhatsApp Bot</h1>
+          <p class="subtitle">
+            <span class="pulse"></span>Waiting for QR scan…
+          </p>
+
+          <div class="qr-wrapper">
+            <img src="${qrImageDataUrl}" alt="WhatsApp QR Code" />
+          </div>
+
+          <div class="steps">
+            <p><strong>Step 1:</strong> Open WhatsApp on your phone</p>
+            <p><strong>Step 2:</strong> Tap <strong>⋮ Menu</strong> → <strong>Linked Devices</strong></p>
+            <p><strong>Step 3:</strong> Tap <strong>Link a Device</strong></p>
+            <p><strong>Step 4:</strong> Point your camera at this QR code</p>
+          </div>
+
+          <p class="refresh-note">⟳ Page auto-refreshes every 30 seconds if QR expires</p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`\n🌐 QR Server running on port ${PORT}`);
+  console.log(`   Local:  http://localhost:${PORT}`);
+  console.log(`   Render: https://your-bot-service.onrender.com\n`);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory session store
-// Tracks each user's conversation state across messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Session shape per user:
- * {
- *   step: "idle" | "awaiting_phone" | "awaiting_confirm" | "polling",
- *   selectedProductId:    number | null,
- *   selectedProductName:  string | null,
- *   selectedProductPrice: number | null,
- *   targetPhone:          string | null,
- *   transactionId:        number | null,
- *   pollCount:            number,
- *   pollInterval:         NodeJS timer | null,
- * }
- */
 const sessions = new Map();
 
 function getSession(from) {
@@ -51,10 +213,7 @@ function getSession(from) {
 
 function resetSession(from) {
   const existing = sessions.get(from);
-  // Clear any running poll timer before resetting
-  if (existing?.pollInterval) {
-    clearInterval(existing.pollInterval);
-  }
+  if (existing?.pollInterval) clearInterval(existing.pollInterval);
   sessions.set(from, {
     step:                 "idle",
     selectedProductId:    null,
@@ -68,7 +227,7 @@ function resetSession(from) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API helpers — all talk to your existing Next.js backend
+// API helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchProducts() {
@@ -146,7 +305,6 @@ async function buildProductListMessage() {
   const products = await fetchProducts();
   if (!products.length) return null;
 
-  // Group by category, max 10 rows per section (WhatsApp limit)
   const grouped = {};
   for (const p of products) {
     const cat = p.category || "OTHER";
@@ -184,18 +342,17 @@ function buildConfirmButtons(productName, price, phone) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Polling — checks transaction status every 5s, times out after 2 minutes
+// Polling loop
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function startPolling(client, from, transactionId) {
-  const session      = getSession(from);
-  session.step       = "polling";
-  session.pollCount  = 0;
+  const session     = getSession(from);
+  session.step      = "polling";
+  session.pollCount = 0;
 
   const interval = setInterval(async () => {
     session.pollCount++;
 
-    // 24 polls × 5 seconds = 2 minutes timeout
     if (session.pollCount > 24) {
       clearInterval(interval);
       session.pollInterval = null;
@@ -218,15 +375,14 @@ async function startPolling(client, from, transactionId) {
         resetSession(from);
         await client.sendMessage(
           from,
-          `🎉 *Bundle Activated!*\n\nYour *${productName}* has been successfully activated.\n\nEnjoy your bundle! 🚀\n\nReply *menu* to buy more packages.`
+          `🎉 *Bundle Activated!*\n\nYour *${productName}* has been successfully activated.\n\nEnjoy! 🚀\n\nReply *menu* to buy more.`
         );
 
       } else if (tx.status === "PAID" || tx.status === "FULFILLING") {
-        // Only send this message once when payment is first confirmed
-        if (session.pollCount === 1 || tx.status === "PAID") {
+        if (session.pollCount === 1) {
           await client.sendMessage(
             from,
-            `💳 *Payment received!*\n\nActivating your *${session.selectedProductName}* now…\n\nPlease wait a moment. ⏳`
+            `💳 *Payment received!*\n\nActivating your *${session.selectedProductName}* now… ⏳`
           );
         }
 
@@ -237,13 +393,11 @@ async function startPolling(client, from, transactionId) {
         resetSession(from);
         await client.sendMessage(
           from,
-          `❌ *Transaction Failed*\n\n${reason}\n\nNo money was deducted from your account.\n\nReply *menu* to try again or call:\n${SUPPORT_PHONE}`
+          `❌ *Transaction Failed*\n\n${reason}\n\nNo money was deducted.\n\nReply *menu* to try again or call:\n${SUPPORT_PHONE}`
         );
       }
-      // PENDING = still waiting for PIN, keep polling silently
-
     } catch (err) {
-      console.error("[Poll] Error checking status:", err.message);
+      console.error("[Poll] Error:", err.message);
     }
   }, 5000);
 
@@ -251,25 +405,19 @@ async function startPolling(client, from, transactionId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Purchase processor — called after user taps "Confirm & Pay"
+// Purchase processor
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function processPurchase(client, from, session) {
-  await client.sendMessage(
-    from,
-    `📤 Sending M-Pesa prompt to *${session.targetPhone}*…`
-  );
+  await client.sendMessage(from, `📤 Sending M-Pesa prompt to *${session.targetPhone}*…`);
 
   try {
     const result = await initiateSTK(session.targetPhone, session.selectedProductId);
 
     if (!result.success) {
-      let errMsg;
-      if (result.code === "RATE_LIMITED") {
-        errMsg = `⏳ Please wait *${result.retryAfterSeconds} seconds* before making another payment request.`;
-      } else {
-        errMsg = `❌ *Could not initiate payment.*\n\n${result.error || "Please try again."}\n\nIf this persists, call: ${SUPPORT_PHONE}`;
-      }
+      const errMsg = result.code === "RATE_LIMITED"
+        ? `⏳ Please wait *${result.retryAfterSeconds} seconds* before making another request.`
+        : `❌ *Could not initiate payment.*\n\n${result.error || "Please try again."}\n\nIf this persists, call: ${SUPPORT_PHONE}`;
       resetSession(from);
       await client.sendMessage(from, errMsg);
       return;
@@ -279,17 +427,16 @@ async function processPurchase(client, from, session) {
 
     await client.sendMessage(
       from,
-      `📱 *M-Pesa prompt sent!*\n\nCheck your phone and *enter your PIN* to pay *Ksh ${session.selectedProductPrice}* for *${session.selectedProductName}*.\n\n_The prompt expires in 60 seconds._`
+      `📱 *M-Pesa prompt sent!*\n\nCheck your phone and *enter your PIN* to pay *Ksh ${session.selectedProductPrice}* for *${session.selectedProductName}*.\n\n_Prompt expires in 60 seconds._`
     );
 
     if (result.data.system_busy) {
       await client.sendMessage(
         from,
-        `⚠️ *Note:* Our activation system is in manual mode. Your bundle will be activated shortly after payment — slight delays expected.`
+        `⚠️ *Note:* Activation is in manual mode. Your bundle will be activated shortly — slight delays expected.`
       );
     }
 
-    // Start polling for confirmation
     await startPolling(client, from, session.transactionId);
 
   } catch (err) {
@@ -303,38 +450,27 @@ async function processPurchase(client, from, session) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Status check — shows last 5 orders for the sender's number
+// Status check
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleStatusCheck(client, from) {
-  // Extract sender's own number from the WhatsApp ID (format: 254712345678@c.us)
   const senderNumber = from.replace("@c.us", "");
   const normPhone    = normalisePhone(senderNumber);
 
   if (!normPhone) {
-    await client.sendMessage(
-      from,
-      `Could not determine your phone number.\nPlease call support: ${SUPPORT_PHONE}`
-    );
+    await client.sendMessage(from, `Could not determine your phone number.\nCall support: ${SUPPORT_PHONE}`);
     return;
   }
 
   const orders = await fetchUserOrders(normPhone);
 
   if (!orders.length) {
-    await client.sendMessage(
-      from,
-      `📭 You have no recent transactions.\n\nReply *menu* to browse packages.`
-    );
+    await client.sendMessage(from, `📭 You have no recent transactions.\n\nReply *menu* to browse packages.`);
     return;
   }
 
   const statusEmoji = {
-    SUCCESS:    "✅",
-    FAILED:     "❌",
-    PENDING:    "⏳",
-    PAID:       "💳",
-    FULFILLING: "⚙️",
+    SUCCESS: "✅", FAILED: "❌", PENDING: "⏳", PAID: "💳", FULFILLING: "⚙️",
   };
 
   const lines = orders.map((tx) => {
@@ -347,7 +483,7 @@ async function handleStatusCheck(client, from) {
 
   await client.sendMessage(
     from,
-    `📊 *Your Recent Orders:*\n\n${lines.join("\n")}\n\nReply *menu* to buy more packages.`
+    `📊 *Your Recent Orders:*\n\n${lines.join("\n")}\n\nReply *menu* to buy more.`
   );
 }
 
@@ -360,29 +496,22 @@ async function handleMessage(client, msg) {
   const body  = (msg.body || "").trim();
   const lower = body.toLowerCase();
 
-  // Only respond to individual chats, not groups
   const chat = await msg.getChat();
   if (chat.isGroup) return;
-
-  // Ignore status broadcasts
   if (from === "status@broadcast") return;
 
   const session = getSession(from);
 
-  // ── Handle interactive List reply (product selected from menu) ─────────────
+  // ── List reply ─────────────────────────────────────────────────────────────
   if (msg.type === "list_response") {
     const selectedId = msg.selectedRowId || "";
-
     if (selectedId.startsWith("buy_")) {
       const productId = parseInt(selectedId.replace("buy_", ""), 10);
       const products  = await fetchProducts();
       const product   = products.find((p) => p.id === productId);
 
       if (!product) {
-        await client.sendMessage(
-          from,
-          "Sorry, that package is no longer available.\n\nReply *menu* to see current packages."
-        );
+        await client.sendMessage(from, "Sorry, that package is no longer available.\n\nReply *menu* to see current packages.");
         return;
       }
 
@@ -393,22 +522,19 @@ async function handleMessage(client, msg) {
 
       await client.sendMessage(
         from,
-        `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* that should receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
+        `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* to receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
       );
       return;
     }
   }
 
-  // ── Handle interactive Button reply (confirm or cancel) ────────────────────
+  // ── Button reply ───────────────────────────────────────────────────────────
   if (msg.type === "buttons_response") {
     const btnId = msg.selectedButtonId || "";
 
     if (btnId === "confirm_no") {
       resetSession(from);
-      await client.sendMessage(
-        from,
-        "Purchase cancelled. ❌\n\nReply *menu* to start again."
-      );
+      await client.sendMessage(from, "Purchase cancelled. ❌\n\nReply *menu* to start again.");
       return;
     }
 
@@ -422,15 +548,13 @@ async function handleMessage(client, msg) {
     }
   }
 
-  // ── Text commands ──────────────────────────────────────────────────────────
-
-  // Greetings & main menu trigger
+  // ── Menu & greetings ───────────────────────────────────────────────────────
   if (
-    lower === "menu"     || lower === "hi"       || lower === "hello"  ||
-    lower === "start"    || lower === "packages"  || lower === "buy"    ||
-    lower === "sema"     || lower === "niaje"     || lower === "habari" ||
-    lower === "hii"      || lower === "hey"       || lower === "data"   ||
-    lower === "airtime"  || lower === "bundles"   || body === "0"
+    lower === "menu"    || lower === "hi"      || lower === "hello"   ||
+    lower === "start"   || lower === "packages" || lower === "buy"     ||
+    lower === "sema"    || lower === "niaje"    || lower === "habari"  ||
+    lower === "hii"     || lower === "hey"      || lower === "data"    ||
+    lower === "airtime" || lower === "bundles"  || body  === "0"
   ) {
     resetSession(from);
     const workerAlive = await checkSystemStatus();
@@ -438,16 +562,13 @@ async function handleMessage(client, msg) {
     if (!workerAlive) {
       await client.sendMessage(
         from,
-        `⚠️ *System Notice:* Our activation system is currently in manual mode. Purchases still work — bundle activation may take a few extra minutes.`
+        `⚠️ *System Notice:* Activation is in manual mode. Purchases still work — bundle activation may take a few extra minutes.`
       );
     }
 
     const listMsg = await buildProductListMessage();
     if (!listMsg) {
-      await client.sendMessage(
-        from,
-        `No packages are available right now. Please try again later or call:\n${SUPPORT_PHONE}`
-      );
+      await client.sendMessage(from, `No packages available right now. Please try later or call:\n${SUPPORT_PHONE}`);
       return;
     }
 
@@ -455,13 +576,11 @@ async function handleMessage(client, msg) {
     return;
   }
 
-  // Order status
   if (lower === "status" || lower === "orders" || lower === "history") {
     await handleStatusCheck(client, from);
     return;
   }
 
-  // Help
   if (lower === "help" || lower === "msaada" || lower === "support") {
     await client.sendMessage(
       from,
@@ -472,25 +591,19 @@ async function handleMessage(client, msg) {
       `• *cancel* — Cancel current session\n` +
       `• *help* — This message\n\n` +
       `*Support:*\n` +
-      `📞 Call: ${SUPPORT_PHONE}\n` +
-      `💬 WhatsApp: ${SUPPORT_PHONE}\n\n` +
+      `📞 Call/WhatsApp: ${SUPPORT_PHONE}\n\n` +
       `_Powered by DataMart_`
     );
     return;
   }
 
-  // Cancel
   if (lower === "cancel" || lower === "stop" || lower === "quit") {
     resetSession(from);
-    await client.sendMessage(
-      from,
-      "Session cancelled. ✅\n\nReply *menu* to start fresh."
-    );
+    await client.sendMessage(from, "Session cancelled. ✅\n\nReply *menu* to start fresh.");
     return;
   }
 
-  // ── Step: waiting for phone number ─────────────────────────────────────────
-
+  // ── Awaiting phone number ──────────────────────────────────────────────────
   if (session.step === "awaiting_phone") {
     const normPhone = normalisePhone(body);
 
@@ -505,20 +618,16 @@ async function handleMessage(client, msg) {
     session.targetPhone = normPhone;
     session.step        = "awaiting_confirm";
 
-    const confirmMsg = buildConfirmButtons(
+    await client.sendMessage(from, buildConfirmButtons(
       session.selectedProductName,
       session.selectedProductPrice,
       normPhone
-    );
-
-    await client.sendMessage(from, confirmMsg);
+    ));
     return;
   }
 
-  // ── Step: waiting for confirmation button tap ──────────────────────────────
-
+  // ── Awaiting confirmation ──────────────────────────────────────────────────
   if (session.step === "awaiting_confirm") {
-    // User typed text instead of tapping a button
     if (lower === "yes" || lower === "confirm" || lower === "pay" || lower === "ndio") {
       await processPurchase(client, from, session);
       return;
@@ -528,7 +637,6 @@ async function handleMessage(client, msg) {
       await client.sendMessage(from, "Purchase cancelled.\n\nReply *menu* to start again.");
       return;
     }
-    // Remind them to tap the buttons
     await client.sendMessage(
       from,
       "Please tap *Confirm & Pay* or *Cancel* on the message above.\n\nOr reply *cancel* to start over."
@@ -536,26 +644,24 @@ async function handleMessage(client, msg) {
     return;
   }
 
-  // ── Step: polling — waiting for M-Pesa payment ─────────────────────────────
-
+  // ── Polling ────────────────────────────────────────────────────────────────
   if (session.step === "polling") {
     if (lower === "cancel") {
       resetSession(from);
       await client.sendMessage(
         from,
-        "Cancelled. ✅ If money was deducted, please contact support:\n" + SUPPORT_PHONE
+        "Cancelled. ✅ If money was deducted, contact support:\n" + SUPPORT_PHONE
       );
       return;
     }
     await client.sendMessage(
       from,
-      `⏳ *Waiting for your M-Pesa payment…*\n\nPlease enter your PIN on the prompt on your phone.\n\nReply *cancel* to abort.`
+      `⏳ *Waiting for your M-Pesa payment…*\n\nPlease enter your PIN on the prompt.\n\nReply *cancel* to abort.`
     );
     return;
   }
 
-  // ── Fallback — idle state, unknown message ─────────────────────────────────
-
+  // ── Fallback ───────────────────────────────────────────────────────────────
   await client.sendMessage(
     from,
     `👋 Welcome to *DataMart!*\n\nGet affordable data bundles, airtime & SMS — paid instantly via M-Pesa.\n\nReply *menu* to see all packages.\nReply *help* for support.\n\n📞 ${SUPPORT_PHONE}`
@@ -563,19 +669,15 @@ async function handleMessage(client, msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WhatsApp client initialisation
+// WhatsApp client
 // ─────────────────────────────────────────────────────────────────────────────
 
 const client = new Client({
   authStrategy: new LocalAuth({
-    // Session is saved here — survives bot restarts without re-scanning QR
     dataPath: "./.wwebjs_auth",
   }),
   puppeteer: {
     headless: true,
-    // No executablePath — Puppeteer uses .puppeteerrc.cjs to find
-    // the Chrome it downloaded into .cache/puppeteer/
-    // This works identically on Windows, Mac, and Linux/Render
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -589,44 +691,48 @@ const client = new Client({
   },
 });
 
-// ── QR code (shown once on first run) ─────────────────────────────────────────
-client.on("qr", (qr) => {
-  console.log("\n📱 Scan this QR code with WhatsApp:\n");
-  console.log("   Open WhatsApp → Settings → Linked Devices → Link a Device\n");
+client.on("qr", async (qr) => {
+  currentQR   = qr;
+  botStatus   = "qr_ready";
+
+  // Also print small version in terminal as backup
+  console.log("\n📱 QR code generated.");
+  console.log("   ➡  Open your browser to scan it properly:\n");
+  console.log(`   Local:  http://localhost:${PORT}`);
+  console.log(`   Render: https://your-bot-service.onrender.com\n`);
   qrcode.generate(qr, { small: true });
-  console.log("");
+
+  // Generate the clean browser-scannable image
+  await updateQRImage(qr);
 });
 
-// ── Auth events ───────────────────────────────────────────────────────────────
 client.on("authenticated", () => {
-  console.log("✅ Authenticated — session saved to .wwebjs_auth/");
+  botStatus = "authenticated";
+  console.log("✅ Authenticated — session saved.");
 });
 
 client.on("auth_failure", (msg) => {
-  console.error("❌ Authentication failed:", msg);
-  console.error("   Delete the .wwebjs_auth/ folder and restart to re-scan QR.");
+  console.error("❌ Auth failed:", msg);
   process.exit(1);
 });
 
-// ── Ready ─────────────────────────────────────────────────────────────────────
 client.on("ready", async () => {
-  console.log("🚀 DataMart WhatsApp Bot is LIVE!\n");
+  botStatus = "ready";
+  console.log("\n🚀 DataMart WhatsApp Bot is LIVE!\n");
   console.log(`   API Base URL : ${API_BASE}`);
   console.log(`   Support Phone: ${SUPPORT_PHONE}\n`);
 
-  // Verify API connectivity on startup
   const products = await fetchProducts();
   if (products.length) {
     console.log(`✅ API reachable — ${products.length} active products loaded.`);
   } else {
-    console.warn("⚠️  Could not load products from API. Check API_BASE_URL in .env");
+    console.warn("⚠️  Could not load products. Check API_BASE_URL in .env");
   }
 
   const workerAlive = await checkSystemStatus();
   console.log(`   Worker status: ${workerAlive ? "🟢 ONLINE" : "🔴 OFFLINE"}\n`);
 });
 
-// ── Incoming messages ─────────────────────────────────────────────────────────
 client.on("message", async (msg) => {
   try {
     await handleMessage(client, msg);
@@ -635,9 +741,9 @@ client.on("message", async (msg) => {
   }
 });
 
-// ── Disconnected — attempt to reconnect ───────────────────────────────────────
 client.on("disconnected", (reason) => {
-  console.warn("\n⚠️  WhatsApp disconnected:", reason);
+  botStatus = "starting";
+  console.warn("\n⚠️  Disconnected:", reason);
   console.log("   Reinitialising in 5 seconds…\n");
   setTimeout(() => {
     client.initialize().catch((err) => {
@@ -648,10 +754,10 @@ client.on("disconnected", (reason) => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-console.log("Starting DataMart WhatsApp Bot…");
+console.log(`\nStarting DataMart WhatsApp Bot…`);
 console.log(`Node.js ${process.version}\n`);
 
 client.initialize().catch((err) => {
-  console.error("Failed to initialise WhatsApp client:", err.message);
+  console.error("Failed to initialise:", err.message);
   process.exit(1);
 });
