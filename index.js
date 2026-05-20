@@ -5,10 +5,10 @@ require("dotenv").config();
 const { Client, LocalAuth, List, Buttons } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const axios  = require("axios");
-const express = require('express');   // <-- Added for Render health check
+const express = require('express');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Health check HTTP server for Render (does not interfere with WhatsApp bot)
+// Health check HTTP server for Render (must bind to 0.0.0.0)
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,18 +16,22 @@ const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => {
   res.status(200).send('OK');
 });
-
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Health check server listening on port ${PORT}`);
+  console.log(`✅ Health check server listening on http://0.0.0.0:${PORT}`);
+});
+server.on('error', (err) => {
+  console.error('❌ HTTP server error:', err.message);
+  process.exit(1);
 });
 
-server.on('error', (err) => {
-  console.error('HTTP server error:', err.message);
-});
+// Periodic log to prove the server is alive (every 5 minutes)
+setInterval(() => {
+  console.log(`[Health] Server still listening on port ${PORT}`);
+}, 5 * 60 * 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -185,13 +189,24 @@ async function buildProductListMessage() {
 
   const sections = Object.entries(grouped).map(([title, rows]) => ({ title, rows }));
 
-  return new List(
-    "Select a package below to purchase via M-Pesa STK Push. 📱",
-    "📦 View Packages",
-    sections,
-    "Available Packages",
-    `Support: ${SUPPORT_PHONE}`
-  );
+  try {
+    return new List(
+      "Select a package below to purchase via M-Pesa STK Push. 📱",
+      "📦 View Packages",
+      sections,
+      "Available Packages",
+      `Support: ${SUPPORT_PHONE}`
+    );
+  } catch (err) {
+    console.error("[List] Failed to create List message, using fallback:", err);
+    // Fallback: simple text list
+    let fallback = "*Available Packages:*\n\n";
+    products.forEach((p, idx) => {
+      fallback += `${idx+1}. *${p.name}* – Ksh ${p.selling_price}\n   Reply *buy ${p.id}* to purchase\n\n`;
+    });
+    fallback += `Reply *help* for support.`;
+    return fallback;
+  }
 }
 
 function buildConfirmButtons(productName, price, phone) {
@@ -379,210 +394,232 @@ async function handleStatusCheck(client, from) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleMessage(client, msg) {
-  const from  = msg.from;
-  const body  = (msg.body || "").trim();
-  const lower = body.toLowerCase();
+  try {
+    const from  = msg.from;
+    const body  = (msg.body || "").trim();
+    const lower = body.toLowerCase();
 
-  // Only respond to individual chats, not groups
-  const chat = await msg.getChat();
-  if (chat.isGroup) return;
+    // Only respond to individual chats, not groups
+    const chat = await msg.getChat();
+    if (chat.isGroup) return;
 
-  // Ignore status broadcasts
-  if (from === "status@broadcast") return;
+    // Ignore status broadcasts
+    if (from === "status@broadcast") return;
 
-  const session = getSession(from);
+    const session = getSession(from);
 
-  // ── Handle interactive List reply (product selected from menu) ─────────────
-  if (msg.type === "list_response") {
-    const selectedId = msg.selectedRowId || "";
+    // ── Handle interactive List reply (product selected from menu) ─────────────
+    if (msg.type === "list_response") {
+      const selectedId = msg.selectedRowId || "";
 
-    if (selectedId.startsWith("buy_")) {
-      const productId = parseInt(selectedId.replace("buy_", ""), 10);
-      const products  = await fetchProducts();
-      const product   = products.find((p) => p.id === productId);
+      if (selectedId.startsWith("buy_")) {
+        const productId = parseInt(selectedId.replace("buy_", ""), 10);
+        const products  = await fetchProducts();
+        const product   = products.find((p) => p.id === productId);
 
-      if (!product) {
+        if (!product) {
+          await client.sendMessage(
+            from,
+            "Sorry, that package is no longer available.\n\nReply *menu* to see current packages."
+          );
+          return;
+        }
+
+        session.selectedProductId    = product.id;
+        session.selectedProductName  = product.name;
+        session.selectedProductPrice = product.selling_price;
+        session.step                 = "awaiting_phone";
+
         await client.sendMessage(
           from,
-          "Sorry, that package is no longer available.\n\nReply *menu* to see current packages."
+          `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* that should receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
+        );
+        return;
+      }
+    }
+
+    // ── Handle interactive Button reply (confirm or cancel) ────────────────────
+    if (msg.type === "buttons_response") {
+      const btnId = msg.selectedButtonId || "";
+
+      if (btnId === "confirm_no") {
+        resetSession(from);
+        await client.sendMessage(
+          from,
+          "Purchase cancelled. ❌\n\nReply *menu* to start again."
         );
         return;
       }
 
-      session.selectedProductId    = product.id;
-      session.selectedProductName  = product.name;
-      session.selectedProductPrice = product.selling_price;
-      session.step                 = "awaiting_phone";
-
-      await client.sendMessage(
-        from,
-        `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* that should receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
-      );
-      return;
-    }
-  }
-
-  // ── Handle interactive Button reply (confirm or cancel) ────────────────────
-  if (msg.type === "buttons_response") {
-    const btnId = msg.selectedButtonId || "";
-
-    if (btnId === "confirm_no") {
-      resetSession(from);
-      await client.sendMessage(
-        from,
-        "Purchase cancelled. ❌\n\nReply *menu* to start again."
-      );
-      return;
-    }
-
-    if (btnId === "confirm_yes") {
-      if (session.step !== "awaiting_confirm") {
-        await client.sendMessage(from, "Session expired. Reply *menu* to start again.");
+      if (btnId === "confirm_yes") {
+        if (session.step !== "awaiting_confirm") {
+          await client.sendMessage(from, "Session expired. Reply *menu* to start again.");
+          return;
+        }
+        await processPurchase(client, from, session);
         return;
       }
-      await processPurchase(client, from, session);
-      return;
-    }
-  }
-
-  // ── Text commands ──────────────────────────────────────────────────────────
-
-  // Greetings & main menu trigger
-  if (
-    lower === "menu"     || lower === "hi"       || lower === "hello"  ||
-    lower === "start"    || lower === "packages"  || lower === "buy"    ||
-    lower === "sema"     || lower === "niaje"     || lower === "habari" ||
-    lower === "hii"      || lower === "hey"       || lower === "data"   ||
-    lower === "airtime"  || lower === "bundles"   || body === "0"
-  ) {
-    resetSession(from);
-    const workerAlive = await checkSystemStatus();
-
-    if (!workerAlive) {
-      await client.sendMessage(
-        from,
-        `⚠️ *System Notice:* Our activation system is currently in manual mode. Purchases still work — bundle activation may take a few extra minutes.`
-      );
     }
 
-    const listMsg = await buildProductListMessage();
-    if (!listMsg) {
-      await client.sendMessage(
-        from,
-        `No packages are available right now. Please try again later or call:\n${SUPPORT_PHONE}`
-      );
-      return;
-    }
+    // ── Text commands ──────────────────────────────────────────────────────────
 
-    await client.sendMessage(from, listMsg);
-    return;
-  }
-
-  // Order status
-  if (lower === "status" || lower === "orders" || lower === "history") {
-    await handleStatusCheck(client, from);
-    return;
-  }
-
-  // Help
-  if (lower === "help" || lower === "msaada" || lower === "support") {
-    await client.sendMessage(
-      from,
-      `*DataMart Help* 🛎️\n\n` +
-      `*Commands:*\n` +
-      `• *menu* — Browse all packages\n` +
-      `• *status* — Your recent orders\n` +
-      `• *cancel* — Cancel current session\n` +
-      `• *help* — This message\n\n` +
-      `*Support:*\n` +
-      `📞 Call: ${SUPPORT_PHONE}\n` +
-      `💬 WhatsApp: ${SUPPORT_PHONE}\n\n` +
-      `_Powered by DataMart_`
-    );
-    return;
-  }
-
-  // Cancel
-  if (lower === "cancel" || lower === "stop" || lower === "quit") {
-    resetSession(from);
-    await client.sendMessage(
-      from,
-      "Session cancelled. ✅\n\nReply *menu* to start fresh."
-    );
-    return;
-  }
-
-  // ── Step: waiting for phone number ─────────────────────────────────────────
-
-  if (session.step === "awaiting_phone") {
-    const normPhone = normalisePhone(body);
-
-    if (!normPhone) {
-      await client.sendMessage(
-        from,
-        `❌ *Invalid phone number:* ${body}\n\nPlease enter a valid Safaricom number:\n• 0712345678\n• 254712345678\n\nOr reply *cancel* to start over.`
-      );
-      return;
-    }
-
-    session.targetPhone = normPhone;
-    session.step        = "awaiting_confirm";
-
-    const confirmMsg = buildConfirmButtons(
-      session.selectedProductName,
-      session.selectedProductPrice,
-      normPhone
-    );
-
-    await client.sendMessage(from, confirmMsg);
-    return;
-  }
-
-  // ── Step: waiting for confirmation button tap ──────────────────────────────
-
-  if (session.step === "awaiting_confirm") {
-    // User typed text instead of tapping a button
-    if (lower === "yes" || lower === "confirm" || lower === "pay" || lower === "ndio") {
-      await processPurchase(client, from, session);
-      return;
-    }
-    if (lower === "no" || lower === "cancel" || lower === "hapana") {
+    // Greetings & main menu trigger
+    if (
+      lower === "menu"     || lower === "hi"       || lower === "hello"  ||
+      lower === "start"    || lower === "packages"  || lower === "buy"    ||
+      lower === "sema"     || lower === "niaje"     || lower === "habari" ||
+      lower === "hii"      || lower === "hey"       || lower === "data"   ||
+      lower === "airtime"  || lower === "bundles"   || body === "0"
+    ) {
       resetSession(from);
-      await client.sendMessage(from, "Purchase cancelled.\n\nReply *menu* to start again.");
+      const workerAlive = await checkSystemStatus();
+
+      if (!workerAlive) {
+        await client.sendMessage(
+          from,
+          `⚠️ *System Notice:* Our activation system is currently in manual mode. Purchases still work — bundle activation may take a few extra minutes.`
+        );
+      }
+
+      const listMsg = await buildProductListMessage();
+      if (!listMsg) {
+        await client.sendMessage(
+          from,
+          `No packages are available right now. Please try again later or call:\n${SUPPORT_PHONE}`
+        );
+        return;
+      }
+
+      try {
+        await client.sendMessage(from, listMsg);
+      } catch (err) {
+        console.error("[Send List] Failed to send List message:", err);
+        if (typeof listMsg === 'string') {
+          await client.sendMessage(from, listMsg);
+        } else {
+          await client.sendMessage(from, "❌ Failed to show packages. Please try again later.");
+        }
+      }
       return;
     }
-    // Remind them to tap the buttons
-    await client.sendMessage(
-      from,
-      "Please tap *Confirm & Pay* or *Cancel* on the message above.\n\nOr reply *cancel* to start over."
-    );
-    return;
-  }
 
-  // ── Step: polling — waiting for M-Pesa payment ─────────────────────────────
+    // Order status
+    if (lower === "status" || lower === "orders" || lower === "history") {
+      await handleStatusCheck(client, from);
+      return;
+    }
 
-  if (session.step === "polling") {
-    if (lower === "cancel") {
+    // Help
+    if (lower === "help" || lower === "msaada" || lower === "support") {
+      await client.sendMessage(
+        from,
+        `*DataMart Help* 🛎️\n\n` +
+        `*Commands:*\n` +
+        `• *menu* — Browse all packages\n` +
+        `• *status* — Your recent orders\n` +
+        `• *cancel* — Cancel current session\n` +
+        `• *help* — This message\n\n` +
+        `*Support:*\n` +
+        `📞 Call: ${SUPPORT_PHONE}\n` +
+        `💬 WhatsApp: ${SUPPORT_PHONE}\n\n` +
+        `_Powered by DataMart_`
+      );
+      return;
+    }
+
+    // Cancel
+    if (lower === "cancel" || lower === "stop" || lower === "quit") {
       resetSession(from);
       await client.sendMessage(
         from,
-        "Cancelled. ✅ If money was deducted, please contact support:\n" + SUPPORT_PHONE
+        "Session cancelled. ✅\n\nReply *menu* to start fresh."
       );
       return;
     }
+
+    // ── Step: waiting for phone number ─────────────────────────────────────────
+
+    if (session.step === "awaiting_phone") {
+      const normPhone = normalisePhone(body);
+
+      if (!normPhone) {
+        await client.sendMessage(
+          from,
+          `❌ *Invalid phone number:* ${body}\n\nPlease enter a valid Safaricom number:\n• 0712345678\n• 254712345678\n\nOr reply *cancel* to start over.`
+        );
+        return;
+      }
+
+      session.targetPhone = normPhone;
+      session.step        = "awaiting_confirm";
+
+      const confirmMsg = buildConfirmButtons(
+        session.selectedProductName,
+        session.selectedProductPrice,
+        normPhone
+      );
+
+      await client.sendMessage(from, confirmMsg);
+      return;
+    }
+
+    // ── Step: waiting for confirmation button tap ──────────────────────────────
+
+    if (session.step === "awaiting_confirm") {
+      // User typed text instead of tapping a button
+      if (lower === "yes" || lower === "confirm" || lower === "pay" || lower === "ndio") {
+        await processPurchase(client, from, session);
+        return;
+      }
+      if (lower === "no" || lower === "cancel" || lower === "hapana") {
+        resetSession(from);
+        await client.sendMessage(from, "Purchase cancelled.\n\nReply *menu* to start again.");
+        return;
+      }
+      // Remind them to tap the buttons
+      await client.sendMessage(
+        from,
+        "Please tap *Confirm & Pay* or *Cancel* on the message above.\n\nOr reply *cancel* to start over."
+      );
+      return;
+    }
+
+    // ── Step: polling — waiting for M-Pesa payment ─────────────────────────────
+
+    if (session.step === "polling") {
+      if (lower === "cancel") {
+        resetSession(from);
+        await client.sendMessage(
+          from,
+          "Cancelled. ✅ If money was deducted, please contact support:\n" + SUPPORT_PHONE
+        );
+        return;
+      }
+      await client.sendMessage(
+        from,
+        `⏳ *Waiting for your M-Pesa payment…*\n\nPlease enter your PIN on the prompt on your phone.\n\nReply *cancel* to abort.`
+      );
+      return;
+    }
+
+    // ── Fallback — idle state, unknown message ─────────────────────────────────
+
     await client.sendMessage(
       from,
-      `⏳ *Waiting for your M-Pesa payment…*\n\nPlease enter your PIN on the prompt on your phone.\n\nReply *cancel* to abort.`
+      `👋 Welcome to *DataMart!*\n\nGet affordable data bundles, airtime & SMS — paid instantly via M-Pesa.\n\nReply *menu* to see all packages.\nReply *help* for support.\n\n📞 ${SUPPORT_PHONE}`
     );
-    return;
+  } catch (err) {
+    console.error("[Message handler error] Full error:", err);
+    console.error("[Message handler error] Stack:", err.stack);
+    const from = msg.from;
+    if (from && !from.includes("@g.us")) {
+      try {
+        await client.sendMessage(from, "⚠️ An internal error occurred. Please try again or contact support.");
+      } catch (sendErr) {
+        console.error("Failed to send error message to user:", sendErr);
+      }
+    }
   }
-
-  // ── Fallback — idle state, unknown message ─────────────────────────────────
-
-  await client.sendMessage(
-    from,
-    `👋 Welcome to *DataMart!*\n\nGet affordable data bundles, airtime & SMS — paid instantly via M-Pesa.\n\nReply *menu* to see all packages.\nReply *help* for support.\n\n📞 ${SUPPORT_PHONE}`
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -654,7 +691,7 @@ client.on("message", async (msg) => {
   try {
     await handleMessage(client, msg);
   } catch (err) {
-    console.error("[Message handler error]", err.message);
+    console.error("[Client message event] Unhandled error:", err);
   }
 });
 
