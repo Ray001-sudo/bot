@@ -16,9 +16,6 @@ const COUNTRY_CODE = process.env.ALLOWED_COUNTRY_CODE || "254";
 // Session path – use environment variable if provided (Render Disk), otherwise default
 const SESSION_DATA_PATH = process.env.SESSION_DATA_PATH || "./.wwebjs_auth";
 
-// Puppeteer executable path – Render uses /usr/bin/google-chrome-stable
-const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Keep‑alive HTTP server (prevents Render from sleeping)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,7 +462,6 @@ const client = new Client({
     dataPath: SESSION_DATA_PATH,
   }),
   puppeteer: {
-    executablePath: PUPPETEER_EXECUTABLE_PATH,
     headless: true,
     args: [
       "--no-sandbox",
@@ -501,7 +497,6 @@ client.on("ready", async () => {
   console.log("🚀 DataMart WhatsApp Bot is ready!");
   console.log(`📡 API Base: ${API_BASE}`);
   console.log(`💾 Session path: ${SESSION_DATA_PATH}`);
-  console.log(`🖥️  Puppeteer executable: ${PUPPETEER_EXECUTABLE_PATH || "default"}`);
 
   // Verify API is reachable
   try {
