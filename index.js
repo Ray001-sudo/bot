@@ -2,7 +2,7 @@
 
 require("dotenv").config();
 
-const { Client, LocalAuth, Buttons } = require("whatsapp-web.js");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const axios = require("axios");
 const express = require("express");
@@ -144,7 +144,7 @@ function normalisePhone(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message builders – plain text menu (no List)
+// Message builder – plain text menu (no buttons, no list)
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildProductTextMessage() {
   const products = await fetchProducts();
@@ -159,18 +159,6 @@ async function buildProductTextMessage() {
   message += `_Reply with the number of the package you want._\n`;
   message += `📞 Support: ${SUPPORT_PHONE}`;
   return message;
-}
-
-function buildConfirmButtons(productName, price, phone) {
-  return new Buttons(
-    `Please confirm your purchase:\n\n*Package:* ${productName}\n*Price:* Ksh ${price}\n*Bundle for:* ${phone}\n\nAn M-Pesa STK Push will be sent to *${phone}* to complete payment.`,
-    [
-      { id: "confirm_yes", body: "✅ Confirm & Pay" },
-      { id: "confirm_no", body: "❌ Cancel" },
-    ],
-    "Confirm Purchase",
-    "Powered by DataMart"
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +222,10 @@ async function startPolling(client, from, transactionId) {
 async function processPurchase(client, from, session) {
   await client.sendMessage(from, `📤 Sending M-Pesa prompt to *${session.targetPhone}*…`);
   try {
+    console.log(`[STK] Calling backend for ${session.targetPhone}, product ${session.selectedProductId}`);
     const result = await initiateSTK(session.targetPhone, session.selectedProductId);
+    console.log(`[STK] Backend response:`, JSON.stringify(result));
+
     if (!result.success) {
       let errMsg =
         result.code === "RATE_LIMITED"
@@ -295,7 +286,7 @@ async function handleStatusCheck(client, from) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main message handler
+// Main message handler – plain text only (NO buttons, NO list)
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleMessage(client, msg) {
   try {
@@ -308,24 +299,6 @@ async function handleMessage(client, msg) {
     if (from === "status@broadcast") return;
 
     const session = getSession(from);
-
-    // ── Handle interactive Button reply (confirm/cancel) ────────────────────
-    if (msg.type === "buttons_response") {
-      const btnId = msg.selectedButtonId || "";
-      if (btnId === "confirm_no") {
-        resetSession(from);
-        await client.sendMessage(from, "Purchase cancelled. ❌\n\nReply *menu* to start again.");
-        return;
-      }
-      if (btnId === "confirm_yes") {
-        if (session.step !== "awaiting_confirm") {
-          await client.sendMessage(from, "Session expired. Reply *menu* to start again.");
-          return;
-        }
-        await processPurchase(client, from, session);
-        return;
-      }
-    }
 
     // ── Text commands ──────────────────────────────────────────────────────
     if (
@@ -402,31 +375,24 @@ async function handleMessage(client, msg) {
         return;
       }
       session.targetPhone = normPhone;
-      session.step = "awaiting_confirm";
-      const confirmMsg = buildConfirmButtons(
-        session.selectedProductName,
-        session.selectedProductPrice,
-        normPhone
+      session.step = "awaiting_confirm_text";   // text confirmation, no buttons
+      await client.sendMessage(
+        from,
+        `✅ *Confirm purchase*\n\nPackage: ${session.selectedProductName}\nPrice: Ksh ${session.selectedProductPrice}\nFor number: ${normPhone}\n\nReply *YES* to pay or *NO* to cancel.`
       );
-      await client.sendMessage(from, confirmMsg);
       return;
     }
 
-    // ── Step: awaiting confirmation button ──────────────────────────────────
-    if (session.step === "awaiting_confirm") {
-      if (lower === "yes" || lower === "confirm" || lower === "pay" || lower === "ndio") {
+    // ── Step: awaiting text confirmation (YES/NO) ───────────────────────────
+    if (session.step === "awaiting_confirm_text") {
+      if (lower === "yes") {
         await processPurchase(client, from, session);
-        return;
-      }
-      if (lower === "no" || lower === "cancel" || lower === "hapana") {
+      } else if (lower === "no") {
         resetSession(from);
-        await client.sendMessage(from, "Purchase cancelled.\n\nReply *menu* to start again.");
-        return;
+        await client.sendMessage(from, "Purchase cancelled. ❌\n\nReply *menu* to start again.");
+      } else {
+        await client.sendMessage(from, "Please reply *YES* to confirm payment or *NO* to cancel.");
       }
-      await client.sendMessage(
-        from,
-        "Please tap *Confirm & Pay* or *Cancel* on the message above.\n\nOr reply *cancel* to start over."
-      );
       return;
     }
 
@@ -448,34 +414,36 @@ async function handleMessage(client, msg) {
     }
 
     // ── Idle state: product selection by number or "buy X" ──────────────────
-    let productId = null;
-    const buyMatch = lower.match(/^buy\s*(\d+)$/);
-    if (buyMatch) {
-      productId = parseInt(buyMatch[1], 10);
-    } else if (/^\d+$/.test(body)) {
-      const index = parseInt(body, 10);
-      const products = await fetchProducts();
-      if (index >= 1 && index <= products.length) {
-        productId = products[index - 1].id;
+    if (session.step === "idle") {
+      let productId = null;
+      const buyMatch = lower.match(/^buy\s*(\d+)$/);
+      if (buyMatch) {
+        productId = parseInt(buyMatch[1], 10);
+      } else if (/^\d+$/.test(body)) {
+        const index = parseInt(body, 10);
+        const products = await fetchProducts();
+        if (index >= 1 && index <= products.length) {
+          productId = products[index - 1].id;
+        }
       }
-    }
 
-    if (productId) {
-      const products = await fetchProducts();
-      const product = products.find((p) => p.id === productId);
-      if (product) {
-        session.selectedProductId = product.id;
-        session.selectedProductName = product.name;
-        session.selectedProductPrice = product.selling_price;
-        session.step = "awaiting_phone";
-        await client.sendMessage(
-          from,
-          `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* that should receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
-        );
-        return;
-      } else {
-        await client.sendMessage(from, `❌ Product not found. Reply *menu* to see available packages.`);
-        return;
+      if (productId) {
+        const products = await fetchProducts();
+        const product = products.find((p) => p.id === productId);
+        if (product) {
+          session.selectedProductId = product.id;
+          session.selectedProductName = product.name;
+          session.selectedProductPrice = product.selling_price;
+          session.step = "awaiting_phone";
+          await client.sendMessage(
+            from,
+            `Great choice! 📦 *${product.name}* — Ksh ${product.selling_price}\n\nPlease send the *phone number* that should receive this bundle:\n\n_Format: 0712345678 or 254712345678_`
+          );
+          return;
+        } else {
+          await client.sendMessage(from, `❌ Product not found. Reply *menu* to see available packages.`);
+          return;
+        }
       }
     }
 
@@ -547,7 +515,6 @@ client.on("ready", async () => {
   const workerAlive = await checkSystemStatus();
   console.log(`   Worker status: ${workerAlive ? "🟢 ONLINE" : "🔴 OFFLINE"}\n`);
 
-  // Start keep‑alive pinger
   if (pingInterval) clearInterval(pingInterval);
   pingInterval = setInterval(sendKeepAlivePing, 30 * 1000);
   reconnectAttempts = 0;
