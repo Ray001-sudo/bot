@@ -4,23 +4,31 @@ require("dotenv").config();
 
 const { Client, LocalAuth, Buttons } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
-const axios  = require("axios");
-const express = require('express');
+const axios = require("axios");
+const express = require("express");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Health check HTTP server for Render
+// Session folder – local directory inside your project
+// ─────────────────────────────────────────────────────────────────────────────
+const SESSION_DATA_PATH = "./session";   // <-- this folder will be created automatically
+console.log(`📁 Session will be stored in: ${SESSION_DATA_PATH}`);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keep‑alive HTTP server (prevents Render from sleeping)
 // ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.status(200).send('OK'));
-app.get('/health', (req, res) => res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() }));
+app.get("/", (req, res) => res.status(200).send("OK"));
+app.get("/health", (req, res) =>
+  res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() })
+);
 
-const server = app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Health check server listening on http://0.0.0.0:${PORT}`);
 });
-server.on('error', (err) => {
-  console.error('❌ HTTP server error:', err.message);
+server.on("error", (err) => {
+  console.error("❌ HTTP server error:", err.message);
   process.exit(1);
 });
 setInterval(() => {
@@ -30,11 +38,11 @@ setInterval(() => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
-const API_BASE      = (process.env.API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+const API_BASE = (process.env.API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "+254700000000";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Session store (unchanged)
+// In‑memory session store (conversation state)
 // ─────────────────────────────────────────────────────────────────────────────
 const sessions = new Map();
 
@@ -70,7 +78,7 @@ function resetSession(from) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API helpers (unchanged)
+// API helpers
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchProducts() {
   try {
@@ -98,17 +106,18 @@ async function pollTransactionStatus(transactionId) {
       { timeout: 10000 }
     );
     return data.success ? data.data : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 async function fetchUserOrders(phone) {
   try {
-    const { data } = await axios.get(
-      `${API_BASE}/api/user/orders?phone=${phone}`,
-      { timeout: 10000 }
-    );
+    const { data } = await axios.get(`${API_BASE}/api/user/orders?phone=${phone}`, { timeout: 10000 });
     return data.success ? data.data : [];
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 async function checkSystemStatus() {
@@ -117,11 +126,13 @@ async function checkSystemStatus() {
     if (!data.success || !data.data?.worker_last_heartbeat) return false;
     const age = Date.now() - new Date(data.data.worker_last_heartbeat).getTime();
     return age < 2 * 60 * 1000;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phone normaliser (unchanged)
+// Phone normaliser
 // ─────────────────────────────────────────────────────────────────────────────
 function normalisePhone(raw) {
   const digits = raw.replace(/\D/g, "");
@@ -133,7 +144,7 @@ function normalisePhone(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message builders – plain text only (NO List)
+// Message builders – plain text menu (no List)
 // ─────────────────────────────────────────────────────────────────────────────
 async function buildProductTextMessage() {
   const products = await fetchProducts();
@@ -141,9 +152,9 @@ async function buildProductTextMessage() {
 
   let message = "*📦 AVAILABLE PACKAGES*\n\n";
   products.forEach((p, idx) => {
-    message += `${idx+1}. *${p.name}* – Ksh ${p.selling_price}\n`;
+    message += `${idx + 1}. *${p.name}* – Ksh ${p.selling_price}\n`;
     if (p.description) message += `   ${p.description.substring(0, 80)}\n`;
-    message += `   Reply *${idx+1}* or *buy ${p.id}* to purchase\n\n`;
+    message += `   Reply *${idx + 1}* or *buy ${p.id}* to purchase\n\n`;
   });
   message += `_Reply with the number of the package you want._\n`;
   message += `📞 Support: ${SUPPORT_PHONE}`;
@@ -163,7 +174,7 @@ function buildConfirmButtons(productName, price, phone) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Polling & purchase logic (unchanged)
+// Polling & purchase logic
 // ─────────────────────────────────────────────────────────────────────────────
 async function startPolling(client, from, transactionId) {
   const session = getSession(from);
@@ -225,9 +236,10 @@ async function processPurchase(client, from, session) {
   try {
     const result = await initiateSTK(session.targetPhone, session.selectedProductId);
     if (!result.success) {
-      let errMsg = result.code === "RATE_LIMITED"
-        ? `⏳ Please wait *${result.retryAfterSeconds} seconds* before making another payment request.`
-        : `❌ *Could not initiate payment.*\n\n${result.error || "Please try again."}\n\nIf this persists, call: ${SUPPORT_PHONE}`;
+      let errMsg =
+        result.code === "RATE_LIMITED"
+          ? `⏳ Please wait *${result.retryAfterSeconds} seconds* before making another payment request.`
+          : `❌ *Could not initiate payment.*\n\n${result.error || "Please try again."}\n\nIf this persists, call: ${SUPPORT_PHONE}`;
       resetSession(from);
       await client.sendMessage(from, errMsg);
       return;
@@ -255,7 +267,10 @@ async function handleStatusCheck(client, from) {
   const senderNumber = from.replace("@c.us", "");
   const normPhone = normalisePhone(senderNumber);
   if (!normPhone) {
-    await client.sendMessage(from, `Could not determine your phone number.\nPlease call support: ${SUPPORT_PHONE}`);
+    await client.sendMessage(
+      from,
+      `Could not determine your phone number.\nPlease call support: ${SUPPORT_PHONE}`
+    );
     return;
   }
   const orders = await fetchUserOrders(normPhone);
@@ -264,16 +279,23 @@ async function handleStatusCheck(client, from) {
     return;
   }
   const statusEmoji = { SUCCESS: "✅", FAILED: "❌", PENDING: "⏳", PAID: "💳", FULFILLING: "⚙️" };
-  const lines = orders.map(tx => {
+  const lines = orders.map((tx) => {
     const emoji = statusEmoji[tx.status] || "•";
-    const date = new Date(tx.created_at).toLocaleDateString("en-KE", { day: "2-digit", month: "short", year: "numeric" });
+    const date = new Date(tx.created_at).toLocaleDateString("en-KE", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
     return `${emoji} *${tx.product_name}* — Ksh ${tx.amount} (${tx.status}) — ${date}`;
   });
-  await client.sendMessage(from, `📊 *Your Recent Orders:*\n\n${lines.join("\n")}\n\nReply *menu* to buy more packages.`);
+  await client.sendMessage(
+    from,
+    `📊 *Your Recent Orders:*\n\n${lines.join("\n")}\n\nReply *menu* to buy more packages.`
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main message handler – now supports plain text product selection
+// Main message handler
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleMessage(client, msg) {
   try {
@@ -306,15 +328,37 @@ async function handleMessage(client, msg) {
     }
 
     // ── Text commands ──────────────────────────────────────────────────────
-    if (lower === "menu" || lower === "hi" || lower === "hello" || lower === "start" || lower === "packages" || lower === "buy" || lower === "sema" || lower === "niaje" || lower === "habari" || lower === "hii" || lower === "hey" || lower === "data" || lower === "airtime" || lower === "bundles" || body === "0") {
+    if (
+      lower === "menu" ||
+      lower === "hi" ||
+      lower === "hello" ||
+      lower === "start" ||
+      lower === "packages" ||
+      lower === "buy" ||
+      lower === "sema" ||
+      lower === "niaje" ||
+      lower === "habari" ||
+      lower === "hii" ||
+      lower === "hey" ||
+      lower === "data" ||
+      lower === "airtime" ||
+      lower === "bundles" ||
+      body === "0"
+    ) {
       resetSession(from);
       const workerAlive = await checkSystemStatus();
       if (!workerAlive) {
-        await client.sendMessage(from, `⚠️ *System Notice:* Our activation system is currently in manual mode. Purchases still work — bundle activation may take a few extra minutes.`);
+        await client.sendMessage(
+          from,
+          `⚠️ *System Notice:* Our activation system is currently in manual mode. Purchases still work — bundle activation may take a few extra minutes.`
+        );
       }
       const textMenu = await buildProductTextMessage();
       if (!textMenu) {
-        await client.sendMessage(from, `No packages are available right now. Please try again later or call:\n${SUPPORT_PHONE}`);
+        await client.sendMessage(
+          from,
+          `No packages are available right now. Please try again later or call:\n${SUPPORT_PHONE}`
+        );
         return;
       }
       await client.sendMessage(from, textMenu);
@@ -329,15 +373,15 @@ async function handleMessage(client, msg) {
       await client.sendMessage(
         from,
         `*DataMart Help* 🛎️\n\n` +
-        `*Commands:*\n` +
-        `• *menu* — Browse all packages\n` +
-        `• *status* — Your recent orders\n` +
-        `• *cancel* — Cancel current session\n` +
-        `• *help* — This message\n\n` +
-        `*Support:*\n` +
-        `📞 Call: ${SUPPORT_PHONE}\n` +
-        `💬 WhatsApp: ${SUPPORT_PHONE}\n\n` +
-        `_Powered by DataMart_`
+          `*Commands:*\n` +
+          `• *menu* — Browse all packages\n` +
+          `• *status* — Your recent orders\n` +
+          `• *cancel* — Cancel current session\n` +
+          `• *help* — This message\n\n` +
+          `*Support:*\n` +
+          `📞 Call: ${SUPPORT_PHONE}\n` +
+          `💬 WhatsApp: ${SUPPORT_PHONE}\n\n` +
+          `_Powered by DataMart_`
       );
       return;
     }
@@ -347,7 +391,7 @@ async function handleMessage(client, msg) {
       return;
     }
 
-    // ── Step: waiting for phone number (unchanged) ──────────────────────────
+    // ── Step: waiting for phone number ──────────────────────────────────────
     if (session.step === "awaiting_phone") {
       const normPhone = normalisePhone(body);
       if (!normPhone) {
@@ -359,12 +403,16 @@ async function handleMessage(client, msg) {
       }
       session.targetPhone = normPhone;
       session.step = "awaiting_confirm";
-      const confirmMsg = buildConfirmButtons(session.selectedProductName, session.selectedProductPrice, normPhone);
+      const confirmMsg = buildConfirmButtons(
+        session.selectedProductName,
+        session.selectedProductPrice,
+        normPhone
+      );
       await client.sendMessage(from, confirmMsg);
       return;
     }
 
-    // ── Step: awaiting confirmation button (unchanged) ──────────────────────
+    // ── Step: awaiting confirmation button ──────────────────────────────────
     if (session.step === "awaiting_confirm") {
       if (lower === "yes" || lower === "confirm" || lower === "pay" || lower === "ndio") {
         await processPurchase(client, from, session);
@@ -382,11 +430,14 @@ async function handleMessage(client, msg) {
       return;
     }
 
-    // ── Step: polling (unchanged) ───────────────────────────────────────────
+    // ── Step: polling ───────────────────────────────────────────────────────
     if (session.step === "polling") {
       if (lower === "cancel") {
         resetSession(from);
-        await client.sendMessage(from, "Cancelled. ✅ If money was deducted, please contact support:\n" + SUPPORT_PHONE);
+        await client.sendMessage(
+          from,
+          "Cancelled. ✅ If money was deducted, please contact support:\n" + SUPPORT_PHONE
+        );
         return;
       }
       await client.sendMessage(
@@ -396,16 +447,12 @@ async function handleMessage(client, msg) {
       return;
     }
 
-    // ── Idle state: check if user replied with a number or "buy X" ──────────
-    // First, try to parse as product selection
+    // ── Idle state: product selection by number or "buy X" ──────────────────
     let productId = null;
-    // Case: "buy 123" or "buy123"
     const buyMatch = lower.match(/^buy\s*(\d+)$/);
     if (buyMatch) {
       productId = parseInt(buyMatch[1], 10);
-    } 
-    // Case: just a number (1, 2, 3...)
-    else if (/^\d+$/.test(body)) {
+    } else if (/^\d+$/.test(body)) {
       const index = parseInt(body, 10);
       const products = await fetchProducts();
       if (index >= 1 && index <= products.length) {
@@ -415,7 +462,7 @@ async function handleMessage(client, msg) {
 
     if (productId) {
       const products = await fetchProducts();
-      const product = products.find(p => p.id === productId);
+      const product = products.find((p) => p.id === productId);
       if (product) {
         session.selectedProductId = product.id;
         session.selectedProductName = product.name;
@@ -452,10 +499,11 @@ async function handleMessage(client, msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WhatsApp client initialisation (unchanged)
+// WhatsApp client initialisation with persistent local session folder
+// and anti‑disconnect measures
 // ─────────────────────────────────────────────────────────────────────────────
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: "./.wwebjs_auth" }),
+  authStrategy: new LocalAuth({ dataPath: SESSION_DATA_PATH }),
   puppeteer: {
     headless: true,
     args: [
@@ -471,6 +519,40 @@ const client = new Client({
   },
 });
 
+// Keep‑alive ping: sends presence every 30 seconds to prevent WebSocket timeout
+let pingInterval = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+
+async function sendKeepAlivePing() {
+  if (!client) return;
+  try {
+    await client.sendPresenceAvailable();
+    console.log("[Ping] Presence sent – connection kept alive");
+  } catch (err) {
+    console.warn("[Ping] Failed to send keep-alive:", err.message);
+  }
+}
+
+client.on("ready", async () => {
+  console.log("🚀 DataMart WhatsApp Bot is LIVE!");
+  console.log(`📁 Session folder: ${SESSION_DATA_PATH}`);
+  console.log(`📡 API Base URL : ${API_BASE}`);
+  console.log(`📞 Support Phone: ${SUPPORT_PHONE}\n`);
+
+  const products = await fetchProducts();
+  if (products.length) console.log(`✅ API reachable — ${products.length} active products loaded.`);
+  else console.warn("⚠️  Could not load products from API. Check API_BASE_URL in .env");
+
+  const workerAlive = await checkSystemStatus();
+  console.log(`   Worker status: ${workerAlive ? "🟢 ONLINE" : "🔴 OFFLINE"}\n`);
+
+  // Start keep‑alive pinger
+  if (pingInterval) clearInterval(pingInterval);
+  pingInterval = setInterval(sendKeepAlivePing, 30 * 1000);
+  reconnectAttempts = 0;
+});
+
 client.on("qr", (qr) => {
   console.log("\n📱 Scan this QR code with WhatsApp:\n");
   console.log("   Open WhatsApp → Settings → Linked Devices → Link a Device\n");
@@ -478,21 +560,13 @@ client.on("qr", (qr) => {
   console.log("");
 });
 
-client.on("authenticated", () => console.log("✅ Authenticated — session saved to .wwebjs_auth/"));
+client.on("authenticated", () => {
+  console.log("✅ Authenticated — session saved to:", SESSION_DATA_PATH);
+});
+
 client.on("auth_failure", (msg) => {
   console.error("❌ Authentication failed:", msg);
   process.exit(1);
-});
-
-client.on("ready", async () => {
-  console.log("🚀 DataMart WhatsApp Bot is LIVE!\n");
-  console.log(`   API Base URL : ${API_BASE}`);
-  console.log(`   Support Phone: ${SUPPORT_PHONE}\n`);
-  const products = await fetchProducts();
-  if (products.length) console.log(`✅ API reachable — ${products.length} active products loaded.`);
-  else console.warn("⚠️  Could not load products from API. Check API_BASE_URL in .env");
-  const workerAlive = await checkSystemStatus();
-  console.log(`   Worker status: ${workerAlive ? "🟢 ONLINE" : "🔴 OFFLINE"}\n`);
 });
 
 client.on("message", async (msg) => {
@@ -505,10 +579,46 @@ client.on("message", async (msg) => {
 
 client.on("disconnected", (reason) => {
   console.warn("\n⚠️  WhatsApp disconnected:", reason);
-  console.log("   Reinitialising in 5 seconds…\n");
-  setTimeout(() => client.initialize().catch(err => { console.error("Failed to reinitialise:", err.message); process.exit(1); }), 5000);
+  if (pingInterval) clearInterval(pingInterval);
+  pingInterval = null;
+
+  const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 300000);
+  reconnectAttempts++;
+  console.log(`   Reconnecting in ${delay / 1000} seconds... (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+
+  setTimeout(() => {
+    if (client) {
+      client.initialize().catch((err) => {
+        console.error("Failed to reinitialise:", err.message);
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          console.error("Max reconnect attempts reached. Exiting.");
+          process.exit(1);
+        }
+      });
+    }
+  }, delay);
 });
 
+// Graceful shutdown
+process.on("SIGINT", async () => {
+  console.log("\nShutting down gracefully...");
+  if (pingInterval) clearInterval(pingInterval);
+  server.close(() => console.log("HTTP server closed"));
+  if (client) await client.destroy();
+  process.exit(0);
+});
+process.on("SIGTERM", async () => {
+  console.log("\nSIGTERM received, shutting down...");
+  if (pingInterval) clearInterval(pingInterval);
+  server.close(() => console.log("HTTP server closed"));
+  if (client) await client.destroy();
+  process.exit(0);
+});
+
+// Start the bot
 console.log("Starting DataMart WhatsApp Bot…");
 console.log(`Node.js ${process.version}\n`);
-client.initialize().catch(err => { console.error("Failed to initialise WhatsApp client:", err.message); process.exit(1); });
+client.initialize().catch((err) => {
+  console.error("Failed to initialise WhatsApp client:", err.message);
+  process.exit(1);
+});
